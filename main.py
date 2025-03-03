@@ -1,46 +1,68 @@
 # Data processing libs.
+from typing import Optional
+
 import numpy as np
 import xarray as xr
 
 # Visualisation libs.
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
-import cartopy.feature as cfeature
 
-# Set parameters.
-# 🔴Critical: Error handling when opening a file.
-try:
-    # Parent coordinate file.
-    pcf = xr.open_dataset('/mnt/localssd/Data_nemo/Meshes_domains/Coordinates/Global/ORCA_R36_coord_new.nc').squeeze()
-except FileNotFoundError:
-    print("Error: Parent coordinate file not found.")
-    exit(1)
-except Exception as e:
-    print(f"Error loading parent coordinate file: {e}")
-    exit(1)
+# Logging and configuration
+import logging
+from pathlib import Path
+from environs import Env
+from xarray import Dataset
 
-x_middle = int(pcf['x'].size / 2)
+# 🟡Preferably: Load environment variables for configuration.
+env = Env()
+env.read_env()
 
-# Enter Pacific and Atlantic y-indicies (latitude-like).
-pac_first_yind = 7550
-pac_last_yind = -2
-atl_first_yind = 7350
-atl_last_yind = -1
+# 🟡Preferably: Setup logging to capture runtime information and errors.
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-# Enter first and last x-indicies (latitude-like). It must be less than 1/2 x-dimention size!
-pac_first_xind = 1500
-pac_last_xind = 5900
-atl_first_xind = pac_last_xind + (x_middle - pac_last_xind) * 2 + 1
-atl_last_xind = pcf['x'].size - pac_first_xind + 1
 
-# Saving properties
-target_path = '/mnt/localssd/Data_nemo/Meshes_domains/Coordinates/Regional'
-target_name = 'arct_cutorca36_coord.nc'
+# 🟡Preferably: Encapsulate configuration in a dedicated class.
+class Config:
+    def __init__(
+            self,
+            parent_file: str,
+            target_path: str,
+            target_name: str,
+            pac_extent: list,
+            atl_extent: list,
+            x_middle: Optional[int] = None,
+    ) -> None:
+        self.parent_file = Path(parent_file)
+        self.target_path = Path(target_path)
+        self.target_name = target_name
+        self.x_middle = x_middle
+        self.pac_extent = pac_extent
+        self.atl_extent = atl_extent
+
+    def load(self) -> None:
+        """Load and validate configuration."""
+        if not self.parent_file.is_file():
+            logging.error(f"Critical: Parent file not found at {self.parent_file}")
+            raise FileNotFoundError
+        if not self.target_path.exists():
+            self.target_path.mkdir(parents=True, exist_ok=True)
+            logging.info(f"Created target directory: {self.target_path}")
+
+        # Calculate Atlantic extent based on Pacific extent
+        pcf = xr.open_dataset(self.parent_file).squeeze()
+        self.x_middle = int(pcf["x"].size / 2)
+        self.atl_extent[2] = (
+                self.pac_extent[3] + (self.x_middle - self.pac_extent[3]) * 2 + 1
+        )
+        self.atl_extent[3] = pcf["x"].size - self.pac_extent[2] + 1
 
 
 # Patch processing
-def grid_selector(pcf, var, extent, pac_patch=False):
-    '''
+def grid_selector(pcf: Dataset, var: str, extent: list, pac_patch: bool = False) -> np.ndarray[tuple[int, ...]] | None:
+    """
     Functon that select and cut 2D arrays from parent global ORCA coordinate file.
 
     Parameters
@@ -58,108 +80,134 @@ def grid_selector(pcf, var, extent, pac_patch=False):
     -------
     grid_array : ndarray
         Ndarray to put in patch dataset.
-    '''
+    """
+
+    # 🟡Preferably: Using valid_vars in the form of a dict is preferable than four separate lists.
+    valid_vars = {
+        "t": ["nav_lon", "nav_lat", "glamt", "gphit", "e1t", "e2t"],
+        "u": ["glamu", "gphiu", "e1u", "e2u"],
+        "v": ["glamv", "gphiv", "e1v", "e2v"],
+        "f": ["glamf", "gphif", "e1f", "e2f"]
+    }
+
+    if var not in sum(valid_vars.values(), []):
+        logging.error(f"Variable {var} not found in valid variables.")
+        return None
 
     # grid type lists
-    t_vars = ['nav_lon', 'nav_lat', 'glamt', 'gphit', 'e1t', 'e2t']
-    u_vars = ['glamu', 'gphiu', 'e1u', 'e2u']
-    v_vars = ['glamv', 'gphiv', 'e1v', 'e2v']
-    f_vars = ['glamf', 'gphif', 'e1f', 'e2f']
+    grid_type = next((key for key, vars in valid_vars.items() if var in vars), None)
 
-    grid_array = None
+    if grid_type == "t":
+        y_slice, x_slice = slice(extent[0], extent[1]), slice(extent[2], extent[3])
+    elif grid_type == "u":
+        y_slice, x_slice = slice(extent[0], extent[1]), slice(extent[2] - 1, extent[3] - 1)
+    elif grid_type == "v":
+        y_slice, x_slice = slice(extent[0] - 1, extent[1] - 1), slice(extent[2], extent[3])
+    elif grid_type == "f":
+        y_slice, x_slice = slice(extent[0] - 1, extent[1] - 1), slice(extent[2] - 1, extent[3] - 1)
 
     # 🔴Critical: Error handling if var not found in parent coordinate file.
     try:
-        if pac_patch:  # Pacific patch selection
-            if var in t_vars:
-                grid_array = np.flip(pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values)
-            elif var in u_vars:
-                grid_array = np.flip(
-                    pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2] - 1, extent[3] - 1)).values)
-            elif var in v_vars:
-                grid_array = np.flip(
-                    pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2], extent[3])).values)
-            elif var in f_vars:
-                grid_array = np.flip(
-                    pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2] - 1, extent[3] - 1)).values)
-        else:  # Atlantic patch selection
-            grid_array = pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values
-    except KeyError:
-        print(f"Error: Variable {var} not found in parent coordinate file.")
+        grid_array = np.flip(pcf[var].sel(y=y_slice, x=x_slice).values)
+    except IndexError:
+        logging.error(f"Index out of bounds for variable {var}.")
         return None
 
     return grid_array
 
 
-
 # Dataset creation
-# TODO: dataset generator. I don't like this wet shit.
-# Atlantic patch as xarray Dataset
-atl_extent = [atl_first_yind, atl_last_yind, atl_first_xind, atl_last_xind]
-atl_dataset = xr.Dataset(
-    data_vars=dict(
-        nav_lon=(["y", "x"], grid_selector(pcf, 'nav_lon', atl_extent)),
-        nav_lat=(["y", "x"], grid_selector(pcf, 'nav_lat', atl_extent)),
-        glamt=(["y", "x"], grid_selector(pcf, 'glamt', atl_extent)),
-        glamu=(["y", "x"], grid_selector(pcf, 'glamu', atl_extent)),
-        glamv=(["y", "x"], grid_selector(pcf, 'glamv', atl_extent)),
-        glamf=(["y", "x"], grid_selector(pcf, 'glamf', atl_extent)),
-        gphit=(["y", "x"], grid_selector(pcf, 'gphit', atl_extent)),
-        gphiu=(["y", "x"], grid_selector(pcf, 'gphiu', atl_extent)),
-        gphiv=(["y", "x"], grid_selector(pcf, 'gphiv', atl_extent)),
-        gphif=(["y", "x"], grid_selector(pcf, 'gphif', atl_extent)),
-        e1t=(["y", "x"], grid_selector(pcf, 'e1t', atl_extent)),
-        e1u=(["y", "x"], grid_selector(pcf, 'e1u', atl_extent)),
-        e1v=(["y", "x"], grid_selector(pcf, 'e1v', atl_extent)),
-        e1f=(["y", "x"], grid_selector(pcf, 'e1f', atl_extent)),
-        e2t=(["y", "x"], grid_selector(pcf, 'e2t', atl_extent)),
-        e2u=(["y", "x"], grid_selector(pcf, 'e2u', atl_extent)),
-        e2v=(["y", "x"], grid_selector(pcf, 'e2v', atl_extent)),
-        e2f=(["y", "x"], grid_selector(pcf, 'e2f', atl_extent))
-    )
-)
+def create_dataset(pcf: Dataset, extent: list, pac_patch: bool = False) -> Dataset:
+    """
+    Create an xarray.Dataset for a given extent.
 
-# Pacific patch as xarray Dataset
-pac_extent = [pac_first_yind, pac_last_yind, pac_first_xind, pac_last_xind]
-pac_dataset = xr.Dataset(
-    data_vars=dict(
-        nav_lon=(["y", "x"], grid_selector(pcf, 'nav_lon', pac_extent, pac_patch=True)),
-        nav_lat=(["y", "x"], grid_selector(pcf, 'nav_lat', pac_extent, pac_patch=True)),
-        glamt=(["y", "x"], grid_selector(pcf, 'glamt', pac_extent, pac_patch=True)),
-        glamu=(["y", "x"], grid_selector(pcf, 'glamu', pac_extent, pac_patch=True)),
-        glamv=(["y", "x"], grid_selector(pcf, 'glamv', pac_extent, pac_patch=True)),
-        glamf=(["y", "x"], grid_selector(pcf, 'glamf', pac_extent, pac_patch=True)),
-        gphit=(["y", "x"], grid_selector(pcf, 'gphit', pac_extent, pac_patch=True)),
-        gphiu=(["y", "x"], grid_selector(pcf, 'gphiu', pac_extent, pac_patch=True)),
-        gphiv=(["y", "x"], grid_selector(pcf, 'gphiv', pac_extent, pac_patch=True)),
-        gphif=(["y", "x"], grid_selector(pcf, 'gphif', pac_extent, pac_patch=True)),
-        e1t=(["y", "x"], grid_selector(pcf, 'e1t', pac_extent, pac_patch=True)),
-        e1u=(["y", "x"], grid_selector(pcf, 'e1u', pac_extent, pac_patch=True)),
-        e1v=(["y", "x"], grid_selector(pcf, 'e1v', pac_extent, pac_patch=True)),
-        e1f=(["y", "x"], grid_selector(pcf, 'e1f', pac_extent, pac_patch=True)),
-        e2t=(["y", "x"], grid_selector(pcf, 'e2t', pac_extent, pac_patch=True)),
-        e2u=(["y", "x"], grid_selector(pcf, 'e2u', pac_extent, pac_patch=True)),
-        e2v=(["y", "x"], grid_selector(pcf, 'e2v', pac_extent, pac_patch=True)),
-        e2f=(["y", "x"], grid_selector(pcf, 'e2f', pac_extent, pac_patch=True))
-    ),
-)
+    Parameters
+    ----------
+    pcf : xarray Dataset
+        Parent global ORCA Coordinate File.
+    extent : list
+        List with indices to cut [y_min, y_max, x_min, x_max].
+    pac_patch : bool
+        Pacific (True) and Atlantic (False) switch (default is False).
 
-whole_dataset = xr.concat([atl_dataset, pac_dataset], dim='y')
+    Returns
+    -------
+    dataset : xarray.Dataset
+        Created dataset.
+    """
+    variables = [
+        "nav_lon", "nav_lat", "glamt", "glamu", "glamv", "glamf",
+        "gphit", "gphiu", "gphiv", "gphif", "e1t", "e1u", "e1v", "e1f",
+        "e2t", "e2u", "e2v", "e2f"
+    ]
 
-# 🔴Critical: Error handling when saving.
-# Save dataset
-try:
-    whole_dataset.to_netcdf(f'{target_path}/{target_name}')
-    print(f"Dataset saved to {target_path}/{target_name}")
-except Exception as e:
-    print(f"Error saving dataset: {e}")
+    # 🟡Preferably: Use dictionary comprehension to build data_vars concisely.
+    data_vars = {
+        var: (["y", "x"], grid_selector(pcf, var, extent, pac_patch))
+        for var in variables
+    }
 
-# Visualization
-try:
-    plt.figure(figsize=(10, 5))
-    ax = plt.axes(projection=ccrs.PlateCarree())
-    ax.coastlines()
-    whole_dataset.nav_lon.plot(ax=ax, transform=ccrs.PlateCarree())
-    plt.show()
-except Exception as e:
-    print(f"Error during visualization: {e}")
+    return xr.Dataset(data_vars)
+
+
+def visualize_dataset(dataset: Dataset):
+    """
+    Visualize the dataset using Cartopy.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        Dataset to visualize.
+    """
+    if "nav_lon" not in dataset:
+        logging.error("Critical: 'nav_lon' not found in dataset. Skipping visualization.")
+        return
+
+    try:
+        plt.figure(figsize=(10, 5))
+        ax = plt.axes(projection=ccrs.PlateCarree())
+        ax.coastlines()
+        dataset.nav_lon.plot(ax=ax, transform=ccrs.PlateCarree(), cmap="coolwarm")
+        plt.title("Longitude Visualization")
+        plt.show()
+    except Exception as e:
+        logging.error(f"Critical: Error during visualization: {e}")
+
+
+def main():
+    # 🟡Preferably: Use a main function to encapsulate the script execution.
+    config = Config(
+        env.str("parent_file"),
+        env.str("target_path"),
+        env.str("target_name"),
+        [7550, -2, 1500, 5900],
+        [7350, -1, None, None])
+    config.load()
+
+    try:
+        pcf = xr.open_dataset(config.parent_file).squeeze()
+        logging.info("Parent coordinate file loaded successfully.")
+
+        # Create datasets
+        atl_dataset = create_dataset(pcf, config.atl_extent)
+        pac_dataset = create_dataset(pcf, config.pac_extent, pac_patch=True)
+
+        # Concatenate datasets
+        whole_dataset = xr.concat([atl_dataset, pac_dataset], dim="y")
+        logging.info("Datasets concatenated successfully.")
+
+        # Save dataset
+        target_file = config.target_path / config.target_name
+        whole_dataset.to_netcdf(target_file)
+        logging.info(f"Dataset saved to {target_file}")
+
+        # Visualize dataset
+        visualize_dataset(whole_dataset)
+
+    except Exception as e:
+        logging.error(f"Critical: An error occurred: {e}")
+
+
+if __name__ == "__main__":
+    # 🟡Preferably: Ensure main() is executed only when running the script directly.
+    main()
