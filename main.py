@@ -8,8 +8,17 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 
 # Set parameters.
-# Parent coordinate file.
-pcf = xr.open_dataset('/mnt/localssd/Data_nemo/Meshes_domains/Coordinates/Global/ORCA_R36_coord_new.nc').squeeze()
+# 🔴Critical: Error handling when opening a file.
+try:
+    # Parent coordinate file.
+    pcf = xr.open_dataset('/mnt/localssd/Data_nemo/Meshes_domains/Coordinates/Global/ORCA_R36_coord_new.nc').squeeze()
+except FileNotFoundError:
+    print("Error: Parent coordinate file not found.")
+    exit(1)
+except Exception as e:
+    print(f"Error loading parent coordinate file: {e}")
+    exit(1)
+
 x_middle = int(pcf['x'].size / 2)
 
 # Enter Pacific and Atlantic y-indicies (latitude-like).
@@ -30,7 +39,6 @@ target_name = 'arct_cutorca36_coord.nc'
 
 
 # Patch processing
-
 def grid_selector(pcf, var, extent, pac_patch=False):
     '''
     Functon that select and cut 2D arrays from parent global ORCA coordinate file.
@@ -42,13 +50,13 @@ def grid_selector(pcf, var, extent, pac_patch=False):
     var : str
         Grid variable name from pcf.
     extent : list
-        List with indicies to cut [y_min, y_max, x_min, x_max].
-    atl_patch : bool
+        List with indices to cut [y_min, y_max, x_min, x_max].
+    pac_patch : bool  # 🔴Critical: The docString was indicated by atl_patch, but the code uses pac_patch.
         Pacific (True) and Atlantic (False) switch (default is False)
 
     Returns
     -------
-    grid_array
+    grid_array : ndarray
         Ndarray to put in patch dataset.
     '''
 
@@ -58,29 +66,34 @@ def grid_selector(pcf, var, extent, pac_patch=False):
     v_vars = ['glamv', 'gphiv', 'e1v', 'e2v']
     f_vars = ['glamf', 'gphif', 'e1f', 'e2f']
 
-    if pac_patch:  # Pacific patch selection
-        if var in t_vars:
-            grid_array = np.flip(pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values)
-        elif var in u_vars:
-            grid_array = np.flip(
-                pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2] - 1, extent[3] - 1)).values)
-        elif var in v_vars:
-            grid_array = np.flip(
-                pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2], extent[3])).values)
-        elif var in f_vars:
-            grid_array = np.flip(
-                pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2] - 1, extent[3] - 1)).values)
-    else:  # Atlantic patch selection
-        grid_array = pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values
+    grid_array = None
 
-    # TODO: There may be var name error handler like "There no variable named {var} in parent coordinate file".
+    # 🔴Critical: Error handling if var not found in parent coordinate file.
+    try:
+        if pac_patch:  # Pacific patch selection
+            if var in t_vars:
+                grid_array = np.flip(pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values)
+            elif var in u_vars:
+                grid_array = np.flip(
+                    pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2] - 1, extent[3] - 1)).values)
+            elif var in v_vars:
+                grid_array = np.flip(
+                    pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2], extent[3])).values)
+            elif var in f_vars:
+                grid_array = np.flip(
+                    pcf[var].sel(y=slice(extent[0] - 1, extent[1] - 1), x=slice(extent[2] - 1, extent[3] - 1)).values)
+        else:  # Atlantic patch selection
+            grid_array = pcf[var].sel(y=slice(extent[0], extent[1]), x=slice(extent[2], extent[3])).values
+    except KeyError:
+        print(f"Error: Variable {var} not found in parent coordinate file.")
+        return None
 
     return grid_array
 
 
+
 # Dataset creation
 # TODO: dataset generator. I don't like this wet shit.
-
 # Atlantic patch as xarray Dataset
 atl_extent = [atl_first_yind, atl_last_yind, atl_first_xind, atl_last_xind]
 atl_dataset = xr.Dataset(
@@ -132,6 +145,21 @@ pac_dataset = xr.Dataset(
 )
 
 whole_dataset = xr.concat([atl_dataset, pac_dataset], dim='y')
-whole_dataset.to_netcdf(f'{target_path}/{target_name}')
 
-# TODO: Some visualization?
+# 🔴Critical: Error handling when saving.
+# Save dataset
+try:
+    whole_dataset.to_netcdf(f'{target_path}/{target_name}')
+    print(f"Dataset saved to {target_path}/{target_name}")
+except Exception as e:
+    print(f"Error saving dataset: {e}")
+
+# Visualization
+try:
+    plt.figure(figsize=(10, 5))
+    ax = plt.axes(projection=ccrs.PlateCarree())
+    ax.coastlines()
+    whole_dataset.nav_lon.plot(ax=ax, transform=ccrs.PlateCarree())
+    plt.show()
+except Exception as e:
+    print(f"Error during visualization: {e}")
